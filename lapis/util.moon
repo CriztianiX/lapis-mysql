@@ -77,7 +77,7 @@ parse_cookie_string = (str) ->
   {unescape(key), unescape(value) for key, value in str\gmatch("([^=%s]*)=([^;]*)")}
 
 slugify = (str) ->
-  (str\gsub("%s+", "-")\gsub("[^%w%-_]+", ""))\lower!
+  (str\gsub("[%s_]+", "-")\gsub("[^%w%-]+", "")\gsub("-+", "-"))\lower!
 
 -- TODO: make this not suck
 underscore = (str) ->
@@ -267,14 +267,27 @@ autoload = do
 
     mod
 
-  (prefix, t={}) ->
+  (...) ->
+    prefixes = {...}
+    last = prefixes[#prefixes]
+    t = if type(last) == "table"
+      prefixes[#prefixes] = nil
+      last
+    else
+      {}
+
+    assert next(prefixes), "missing prefixes for autoload"
+
     setmetatable t, __index: (mod_name) =>
       local mod
 
-      mod = try_require prefix .. "." .. mod_name
+      for prefix in *prefixes
+        mod = try_require prefix .. "." .. mod_name
 
-      unless mod
-        mod = try_require prefix .. "." .. underscore mod_name
+        unless mod
+          mod = try_require prefix .. "." .. underscore mod_name
+
+        break if mod
 
       @[mod_name] = mod
       mod
@@ -343,10 +356,15 @@ mixin = do
     for to_mix in *{...}
       mixin_class target, to_mix
 
+get_fields = (obj, key, ...) ->
+  return unless obj
+  return unless key
+  obj[key], get_fields obj, ...
+
 
 { :unescape, :escape, :escape_pattern, :parse_query_string,
   :parse_content_disposition, :parse_cookie_string, :encode_query_string,
   :underscore, :slugify, :uniquify, :trim, :trim_all, :trim_filter,
   :key_filter, :to_json, :from_json, :json_encodable, :build_url, :time_ago,
   :time_ago_in_words, :camelize, :title_case, :autoload, :auto_table,
-  :mixin_class, :mixin }
+  :mixin_class, :mixin, :get_fields }

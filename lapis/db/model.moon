@@ -1,16 +1,103 @@
 
 db = require "lapis.db"
 
-import underscore, escape_pattern, uniquify from require "lapis.util"
+import underscore, escape_pattern, uniquify, get_fields from require "lapis.util"
 import insert, concat from table
 
 cjson = require "cjson"
+import OffsetPaginator from require "lapis.db.pagination"
 
 local *
+
+-- TODO: need a proper singularize
+singularize = (name)->
+  name\match"^(.*)s$" or name
+
+class Enum
+  -- convert string to number, or let number pass through
+  for_db: (key) =>
+    if type(key) == "string"
+      (assert @[key], "enum does not contain key #{key}")
+    elseif type(key) == "number"
+      assert @[key], "enum does not contain val #{key}"
+      key
+    else
+      error "don't know how to handle type #{type key} for enum"
+
+  -- convert number to string, or let string pass through
+  to_name: (val) =>
+    if type(val) == "string"
+      assert @[val], "enum does not contain key #{val}"
+      val
+    elseif type(val) == "number"
+      key = @[val]
+      (assert key, "enum does not contain val #{val}")
+    else
+      error "don't know how to handle type #{type val} for enum"
+
+enum = (tbl) ->
+  keys = [k for k in pairs tbl]
+  for key in *keys
+    tbl[tbl[key]] = key
+
+  setmetatable tbl, Enum.__base
+
+-- class Things extends Model
+--   @relations: {
+--     {"user", has_one: "Users"}
+--     {"posts", has_many: "Posts", pager: true, order: "id ASC"}
+--   }
+add_relations = (relations) =>
+  for relation in *relations
+    name = assert relation[1], "missing relation name"
+    fn_name = relation.as or "get_#{name}"
+    assert_model = (source) ->
+      models = require "models"
+      assert models[source], "failed to find model for relationship"
+
+    if source = relation.has_one
+      switch type source
+        when "string"
+          column_name = "#{name}_id"
+          @__base[fn_name] = =>
+            existing = @[name]
+            return existing if existing != nil
+            model = assert_model source
+            with obj = model\find @[column_name]
+              @[name] = obj
+
+        when "function"
+          @__base[fn_name] = =>
+            existing = @[name]
+            return existing if existing != nil
+            with obj = source @
+              @[name] = obj
+
+    if source = relation.has_many
+      if relation.pager != false
+        @__base[fn_name] = (opts) =>
+          model = assert_model source
+          clause = {
+            ["#{singularize @@table_name!}_id"]: @[@@primary_keys!]
+          }
+
+          if where = relation.where
+            for k,v in pairs where
+              clause[k] = v
+
+          clause = db.encode_clause clause
+
+          model\paginated "where #{clause}", opts
+      else
+        error "not yet"
 
 class Model
   @timestamp: false
   @primary_key: "id"
+
+  @__inherited: (child) =>
+    if r = child.relations
+      add_relations child, r
 
   @primary_keys: =>
     if type(@primary_key) == "table"
@@ -81,6 +168,7 @@ class Model
 
     unpack(db.select query).c
 
+
   -- include references to this model in a list of records based on a foreign
   -- key
   -- Examples:
@@ -137,9 +225,7 @@ class Model
         field_name = if opts and opts.as
           opts.as
         elseif flip
-          -- TODO: need a proper singularize
-          tbl = @table_name!
-          tbl\match"^(.*)s$" or tbl
+          singularize @table_name!
         else
           foreign_key\match "^(.*)_#{escape_pattern(@primary_key)}$"
 
@@ -200,7 +286,18 @@ class Model
           return nil, err
 
     values._timestamp = true if @timestamp
-    res = db.insert @table_name!, values, @primary_keys!
+
+    local returning
+    for k, v in pairs values
+      if db.is_raw v
+        returning or= {@primary_keys!}
+        table.insert returning, k
+
+    res = if returning
+      db.insert @table_name!, values, unpack returning
+    else
+      db.insert @table_name!, values, @primary_keys!
+
     if res
       for k,v in pairs res[1]
         values[k] = v
@@ -225,7 +322,7 @@ class Model
       fn @, value, key, obj
 
   @paginated: (...) =>
-    Paginator @, ...
+    OffsetPaginator @, ...
 
   -- alternative to MoonScript inheritance
   @extend: (table_name, tbl={}) =>
@@ -270,62 +367,53 @@ class Model
       {first, ...}
 
     return if next(columns) == nil
-    values = { col, @[col] for col in *columns }
 
     if @@constraints
-      for key, value in pairs values
-        if err = @@_check_constraint key, value, @
+      for _, column in pairs columns
+        if err = @@_check_constraint column, @[column], @
           return nil, err
 
-    values._timestamp = true if @@timestamp
+    values = { col, @[col] for col in *columns }
+
+    -- update options
+    nargs = select "#", ...
+    last = nargs > 0 and select nargs, ...
+
+    opts = if type(last) == "table" then last
+
+    if @@timestamp and not (opts and opts.timestamp == false)
+      values._timestamp = true
+
     db.update @@table_name!, values, cond
 
-class Paginator
-  per_page: 10
+  -- reload fields on the instance
+  refresh: (fields="*", ...) =>
+    local field_names
 
-  new: (@model, clause, ...) =>
-    param_count = select "#", ...
+    if fields != "*"
+      field_names = {fields, ...}
+      fields = table.concat [db.escape_identifier f for f in *field_names], ", "
 
-    opts = if param_count > 0
-      last = select param_count, ...
-      type(last) == "table" and last
+    cond = db.encode_clause @_primary_cond!
+    tbl_name = db.escape_identifier @@table_name!
+    res = unpack db.select "#{fields} from #{tbl_name} where #{cond}"
 
-    @per_page = @model.per_page
-    @per_page = opts.per_page if opts
-    @prepare_results = opts.prepare_results if opts and opts.prepare_results
+    unless res
+      error "failed to find row to refresh from, did the primary key change?"
 
-    @_clause = db.interpolate_query clause, ...
-    @opts = opts
+    if field_names
+      for field in *field_names
+        @[field] = res[field]
+    else
+      for k,v in pairs @
+        @[k] = nil
 
-  each_page: (starting_page=1)=>
-    coroutine.wrap ->
-      page = starting_page
-      while true
-        results = @get_page page
-        break unless next results
-        coroutine.yield results, page
-        page += 1
+      for k,v in pairs res
+        @[k] = v
 
+      @@load @
 
-  get_all: =>
-    @.prepare_results @model\select @_clause, @opts
+    @
 
-  -- 1 indexed page
-  get_page: (page) =>
-    page = (math.max 1, tonumber(page) or 0) - 1
-    @.prepare_results @model\select @_clause .. [[
-      limit ?
-      offset ?
-    ]], @per_page, @per_page * page, @opts
-
-  num_pages: =>
-    math.ceil @total_items! / @per_page
-
-  total_items: =>
-    @_count or= @model\count db.parse_clause(@_clause).where
-    @_count
-
-  prepare_results: (...) -> ...
-
-{ :Model, :Paginator }
+{ :Model, :Enum, :enum }
 

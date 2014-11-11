@@ -6,11 +6,8 @@ do
   concat, insert = _obj_0.concat, _obj_0.insert
 end
 local floor
-do
-  local _obj_0 = math
-  floor = _obj_0.floor
-end
-local unescape, escape, escape_pattern, inject_tuples, parse_query_string, encode_query_string, parse_content_disposition, parse_cookie_string, slugify, underscore, camelize, uniquify, trim, trim_all, trim_filter, key_filter, json_encodable, to_json, from_json, build_url, time_ago, time_ago_in_words, title_case, autoload, auto_table, mixin_class, mixin
+floor = math.floor
+local unescape, escape, escape_pattern, inject_tuples, parse_query_string, encode_query_string, parse_content_disposition, parse_cookie_string, slugify, underscore, camelize, uniquify, trim, trim_all, trim_filter, key_filter, json_encodable, to_json, from_json, build_url, time_ago, time_ago_in_words, title_case, autoload, auto_table, mixin_class, mixin, get_fields
 do
   local u = url.unescape
   unescape = function(str)
@@ -109,7 +106,7 @@ parse_cookie_string = function(str)
   return _tbl_0
 end
 slugify = function(str)
-  return (str:gsub("%s+", "-"):gsub("[^%w%-_]+", "")):lower()
+  return (str:gsub("[%s_]+", "-"):gsub("[^%w%-]+", ""):gsub("-+", "-")):lower()
 end
 underscore = function(str)
   local words
@@ -381,16 +378,31 @@ do
     end
     return mod
   end
-  autoload = function(prefix, t)
-    if t == nil then
+  autoload = function(...)
+    local prefixes = {
+      ...
+    }
+    local last = prefixes[#prefixes]
+    local t
+    if type(last) == "table" then
+      prefixes[#prefixes] = nil
+      t = last
+    else
       t = { }
     end
+    assert(next(prefixes), "missing prefixes for autoload")
     return setmetatable(t, {
       __index = function(self, mod_name)
         local mod
-        mod = try_require(prefix .. "." .. mod_name)
-        if not (mod) then
-          mod = try_require(prefix .. "." .. underscore(mod_name))
+        for _index_0 = 1, #prefixes do
+          local prefix = prefixes[_index_0]
+          mod = try_require(prefix .. "." .. mod_name)
+          if not (mod) then
+            mod = try_require(prefix .. "." .. underscore(mod_name))
+          end
+          if mod then
+            break
+          end
         end
         self[mod_name] = mod
         return mod
@@ -493,6 +505,15 @@ do
     end
   end
 end
+get_fields = function(obj, key, ...)
+  if not (obj) then
+    return 
+  end
+  if not (key) then
+    return 
+  end
+  return obj[key], get_fields(obj, ...)
+end
 return {
   unescape = unescape,
   escape = escape,
@@ -519,5 +540,6 @@ return {
   autoload = autoload,
   auto_table = auto_table,
   mixin_class = mixin_class,
-  mixin = mixin
+  mixin = mixin,
+  get_fields = get_fields
 }

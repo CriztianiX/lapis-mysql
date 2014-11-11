@@ -1,8 +1,8 @@
 local db = require("lapis.db")
-local underscore, escape_pattern, uniquify
+local underscore, escape_pattern, uniquify, get_fields
 do
   local _obj_0 = require("lapis.util")
-  underscore, escape_pattern, uniquify = _obj_0.underscore, _obj_0.escape_pattern, _obj_0.uniquify
+  underscore, escape_pattern, uniquify, get_fields = _obj_0.underscore, _obj_0.escape_pattern, _obj_0.uniquify, _obj_0.get_fields
 end
 local insert, concat
 do
@@ -10,7 +10,139 @@ do
   insert, concat = _obj_0.insert, _obj_0.concat
 end
 local cjson = require("cjson")
-local Model, Paginator
+local OffsetPaginator
+OffsetPaginator = require("lapis.db.pagination").OffsetPaginator
+local singularize, Enum, enum, add_relations, Model
+singularize = function(name)
+  return name:match("^(.*)s$") or name
+end
+do
+  local _base_0 = {
+    for_db = function(self, key)
+      if type(key) == "string" then
+        return (assert(self[key], "enum does not contain key " .. tostring(key)))
+      elseif type(key) == "number" then
+        assert(self[key], "enum does not contain val " .. tostring(key))
+        return key
+      else
+        return error("don't know how to handle type " .. tostring(type(key)) .. " for enum")
+      end
+    end,
+    to_name = function(self, val)
+      if type(val) == "string" then
+        assert(self[val], "enum does not contain key " .. tostring(val))
+        return val
+      elseif type(val) == "number" then
+        local key = self[val]
+        return (assert(key, "enum does not contain val " .. tostring(val)))
+      else
+        return error("don't know how to handle type " .. tostring(type(val)) .. " for enum")
+      end
+    end
+  }
+  _base_0.__index = _base_0
+  local _class_0 = setmetatable({
+    __init = function() end,
+    __base = _base_0,
+    __name = "Enum"
+  }, {
+    __index = _base_0,
+    __call = function(cls, ...)
+      local _self_0 = setmetatable({}, _base_0)
+      cls.__init(_self_0, ...)
+      return _self_0
+    end
+  })
+  _base_0.__class = _class_0
+  Enum = _class_0
+end
+enum = function(tbl)
+  local keys
+  do
+    local _accum_0 = { }
+    local _len_0 = 1
+    for k in pairs(tbl) do
+      _accum_0[_len_0] = k
+      _len_0 = _len_0 + 1
+    end
+    keys = _accum_0
+  end
+  for _index_0 = 1, #keys do
+    local key = keys[_index_0]
+    tbl[tbl[key]] = key
+  end
+  return setmetatable(tbl, Enum.__base)
+end
+add_relations = function(self, relations)
+  for _index_0 = 1, #relations do
+    local relation = relations[_index_0]
+    local name = assert(relation[1], "missing relation name")
+    local fn_name = relation.as or "get_" .. tostring(name)
+    local assert_model
+    assert_model = function(source)
+      local models = require("models")
+      return assert(models[source], "failed to find model for relationship")
+    end
+    do
+      local source = relation.has_one
+      if source then
+        local _exp_0 = type(source)
+        if "string" == _exp_0 then
+          local column_name = tostring(name) .. "_id"
+          self.__base[fn_name] = function(self)
+            local existing = self[name]
+            if existing ~= nil then
+              return existing
+            end
+            local model = assert_model(source)
+            do
+              local obj = model:find(self[column_name])
+              self[name] = obj
+              return obj
+            end
+          end
+        elseif "function" == _exp_0 then
+          self.__base[fn_name] = function(self)
+            local existing = self[name]
+            if existing ~= nil then
+              return existing
+            end
+            do
+              local obj = source(self)
+              self[name] = obj
+              return obj
+            end
+          end
+        end
+      end
+    end
+    do
+      local source = relation.has_many
+      if source then
+        if relation.pager ~= false then
+          self.__base[fn_name] = function(self, opts)
+            local model = assert_model(source)
+            local clause = {
+              [tostring(singularize(self.__class:table_name())) .. "_id"] = self[self.__class:primary_keys()]
+            }
+            do
+              local where = relation.where
+              if where then
+                for k, v in pairs(where) do
+                  clause[k] = v
+                end
+              end
+            end
+            clause = db.encode_clause(clause)
+            return model:paginated("where " .. tostring(clause), opts)
+          end
+        else
+          error("not yet")
+        end
+      end
+    end
+  end
+end
 do
   local _base_0 = {
     _primary_cond = function(self)
@@ -73,6 +205,16 @@ do
       if next(columns) == nil then
         return 
       end
+      if self.__class.constraints then
+        for _, column in pairs(columns) do
+          do
+            local err = self.__class:_check_constraint(column, self[column], self)
+            if err then
+              return nil, err
+            end
+          end
+        end
+      end
       local values
       do
         local _tbl_0 = { }
@@ -82,20 +224,59 @@ do
         end
         values = _tbl_0
       end
-      if self.__class.constraints then
-        for key, value in pairs(values) do
-          do
-            local err = self.__class:_check_constraint(key, value, self)
-            if err then
-              return nil, err
-            end
-          end
-        end
+      local nargs = select("#", ...)
+      local last = nargs > 0 and select(nargs, ...)
+      local opts
+      if type(last) == "table" then
+        opts = last
       end
-      if self.__class.timestamp then
+      if self.__class.timestamp and not (opts and opts.timestamp == false) then
         values._timestamp = true
       end
       return db.update(self.__class:table_name(), values, cond)
+    end,
+    refresh = function(self, fields, ...)
+      if fields == nil then
+        fields = "*"
+      end
+      local field_names
+      if fields ~= "*" then
+        field_names = {
+          fields,
+          ...
+        }
+        fields = table.concat((function()
+          local _accum_0 = { }
+          local _len_0 = 1
+          for _index_0 = 1, #field_names do
+            local f = field_names[_index_0]
+            _accum_0[_len_0] = db.escape_identifier(f)
+            _len_0 = _len_0 + 1
+          end
+          return _accum_0
+        end)(), ", ")
+      end
+      local cond = db.encode_clause(self:_primary_cond())
+      local tbl_name = db.escape_identifier(self.__class:table_name())
+      local res = unpack(db.select(tostring(fields) .. " from " .. tostring(tbl_name) .. " where " .. tostring(cond)))
+      if not (res) then
+        error("failed to find row to refresh from, did the primary key change?")
+      end
+      if field_names then
+        for _index_0 = 1, #field_names do
+          local field = field_names[_index_0]
+          self[field] = res[field]
+        end
+      else
+        for k, v in pairs(self) do
+          self[k] = nil
+        end
+        for k, v in pairs(res) do
+          self[k] = v
+        end
+        self.__class:load(self)
+      end
+      return self
     end
   }
   _base_0.__index = _base_0
@@ -115,6 +296,14 @@ do
   local self = _class_0
   self.timestamp = false
   self.primary_key = "id"
+  self.__inherited = function(self, child)
+    do
+      local r = child.relations
+      if r then
+        return add_relations(child, r)
+      end
+    end
+  end
   self.primary_keys = function(self)
     if type(self.primary_key) == "table" then
       return unpack(self.primary_key)
@@ -271,8 +460,7 @@ do
           if opts and opts.as then
             field_name = opts.as
           elseif flip then
-            local tbl = self:table_name()
-            field_name = tbl:match("^(.*)s$") or tbl
+            field_name = singularize(self:table_name())
           else
             field_name = foreign_key:match("^(.*)_" .. tostring(escape_pattern(self.primary_key)) .. "$")
           end
@@ -363,7 +551,21 @@ do
     if self.timestamp then
       values._timestamp = true
     end
-    local res = db.insert(self:table_name(), values, self:primary_keys())
+    local returning
+    for k, v in pairs(values) do
+      if db.is_raw(v) then
+        returning = returning or {
+          self:primary_keys()
+        }
+        table.insert(returning, k)
+      end
+    end
+    local res
+    if returning then
+      res = db.insert(self:table_name(), values, unpack(returning))
+    else
+      res = db.insert(self:table_name(), values, self:primary_keys())
+    end
     if res then
       for k, v in pairs(res[1]) do
         values[k] = v
@@ -398,7 +600,7 @@ do
     end
   end
   self.paginated = function(self, ...)
-    return Paginator(self, ...)
+    return OffsetPaginator(self, ...)
   end
   self.extend = function(self, table_name, tbl)
     if tbl == nil then
@@ -418,79 +620,8 @@ do
   end
   Model = _class_0
 end
-do
-  local _base_0 = {
-    per_page = 10,
-    each_page = function(self, starting_page)
-      if starting_page == nil then
-        starting_page = 1
-      end
-      return coroutine.wrap(function()
-        local page = starting_page
-        while true do
-          local results = self:get_page(page)
-          if not (next(results)) then
-            break
-          end
-          coroutine.yield(results, page)
-          page = page + 1
-        end
-      end)
-    end,
-    get_all = function(self)
-      return self.prepare_results(self.model:select(self._clause, self.opts))
-    end,
-    get_page = function(self, page)
-      page = (math.max(1, tonumber(page) or 0)) - 1
-      return self.prepare_results(self.model:select(self._clause .. [[      limit ?
-      offset ?
-    ]], self.per_page, self.per_page * page, self.opts))
-    end,
-    num_pages = function(self)
-      return math.ceil(self:total_items() / self.per_page)
-    end,
-    total_items = function(self)
-      self._count = self._count or self.model:count(db.parse_clause(self._clause).where)
-      return self._count
-    end,
-    prepare_results = function(...)
-      return ...
-    end
-  }
-  _base_0.__index = _base_0
-  local _class_0 = setmetatable({
-    __init = function(self, model, clause, ...)
-      self.model = model
-      local param_count = select("#", ...)
-      local opts
-      if param_count > 0 then
-        local last = select(param_count, ...)
-        opts = type(last) == "table" and last
-      end
-      self.per_page = self.model.per_page
-      if opts then
-        self.per_page = opts.per_page
-      end
-      if opts and opts.prepare_results then
-        self.prepare_results = opts.prepare_results
-      end
-      self._clause = db.interpolate_query(clause, ...)
-      self.opts = opts
-    end,
-    __base = _base_0,
-    __name = "Paginator"
-  }, {
-    __index = _base_0,
-    __call = function(cls, ...)
-      local _self_0 = setmetatable({}, _base_0)
-      cls.__init(_self_0, ...)
-      return _self_0
-    end
-  })
-  _base_0.__class = _class_0
-  Paginator = _class_0
-end
 return {
   Model = Model,
-  Paginator = Paginator
+  Enum = Enum,
+  enum = enum
 }

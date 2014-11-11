@@ -122,14 +122,20 @@ describe "lapis.db.model", ->
 
     p2\get_page 3
 
-    -- TODO: make clause optional
     p3 = Things\paginated "", fields: "hello, world", per_page: 12
     p3\get_page 2
 
-    p4 = Things\paginated [[order by BLAH]]
-    iter = p4\each_page!
+    p4 = Things\paginated fields: "hello, world", per_page: 12
+    p4\get_page 2
+
+    p5 = Things\paginated [[order by BLAH]]
+    iter = p5\each_page!
     iter!
     iter!
+
+    p6 = Things\paginated [[join whales on color = blue order by BLAH]]
+    p6\total_items!
+    p6\get_page 2
 
     assert_queries {
       'SELECT * from "things" where group_id = 123 order by name asc'
@@ -138,9 +144,63 @@ describe "lapis.db.model", ->
       'SELECT * from "things" where group_id = 123 order by name asc limit 10 offset 30 '
       'SELECT * from "things" order by name asc limit 25 offset 50 '
       'SELECT hello, world from "things" limit 12 offset 12 '
+      'SELECT hello, world from "things" limit 12 offset 12 '
       'SELECT * from "things" order by BLAH limit 10 offset 0 '
       'SELECT * from "things" order by BLAH limit 10 offset 10 '
+      'SELECT COUNT(*) as c from "things" join whales on color = blue '
+      'SELECT * from "things" join whales on color = blue order by BLAH limit 10 offset 10 '
     }, queries
+
+
+  it "should ordered paginate", ->
+    import OrderedPaginator from require "lapis.db.pagination"
+    class Things extends Model
+
+    pager = OrderedPaginator Things, "id", "where color = blue"
+    res, np = pager\get_page!
+
+    res, np = pager\get_page 123
+
+    assert_queries {
+      'SELECT * from "things" where color = blue order by "id" ASC limit 10'
+      'SELECT * from "things" where "id" > 123 and (color = blue) order by "id" ASC limit 10'
+    }, queries
+
+  it "should ordered paginate with multiple keys", ->
+    import OrderedPaginator from require "lapis.db.pagination"
+    class Things extends Model
+
+    query_mock['SELECT'] = { { id: 101, updated_at: 300 }, { id: 102, updated_at: 301 } }
+
+    pager = OrderedPaginator Things, {"id", "updated_at"}, "where color = blue"
+
+    res, next_id, next_updated_at = pager\get_page!
+
+    assert.same 102, next_id
+    assert.same 301, next_updated_at
+
+    pager\after!
+    pager\before!
+
+    pager\after 100
+    pager\before 32
+
+    pager\after 100, 200
+    pager\before 32, 42
+
+    assert_queries {
+      'SELECT * from "things" where color = blue order by "id" ASC, "updated_at" ASC limit 10'
+
+      'SELECT * from "things" where color = blue order by "id" ASC, "updated_at" ASC limit 10'
+      'SELECT * from "things" where color = blue order by "id" DESC, "updated_at" DESC limit 10'
+
+      'SELECT * from "things" where "id" > 100 and (color = blue) order by "id" ASC, "updated_at" ASC limit 10'
+      'SELECT * from "things" where "id" < 32 and (color = blue) order by "id" DESC, "updated_at" DESC limit 10'
+
+      'SELECT * from "things" where "id" > 100 and "updated_at" > 200 and (color = blue) order by "id" ASC, "updated_at" ASC limit 10'
+      'SELECT * from "things" where "id" < 32 and "updated_at" < 42 and (color = blue) order by "id" DESC, "updated_at" DESC limit 10'
+    }, queries
+
 
   it "should create model", ->
     class Things extends Model
@@ -182,6 +242,46 @@ describe "lapis.db.model", ->
     }, queries
 
 
+  it "should refresh model", ->
+    class Things extends Model
+    query_mock['SELECT'] = { { id: 123 } }
+
+    instance = Things\load { id: 123 }
+    instance\refresh!
+    assert.same { id: 123 }, instance
+
+    instance\refresh "hello"
+    assert.same { id: 123 }, instance
+
+    instance\refresh "foo", "bar"
+    assert.same { id: 123 }, instance
+
+    assert_queries {
+      'SELECT * from "things" where "id" = 123'
+      'SELECT "hello" from "things" where "id" = 123'
+      'SELECT "foo", "bar" from "things" where "id" = 123'
+    }, queries
+
+
+  it "should refresh model with composite primary key", ->
+    class Things extends Model
+      @primary_key: {"a", "b"}
+
+    query_mock['SELECT'] = { { a: "hello", b: false } }
+    instance = Things\load { a: "hello", b: false }
+    instance\refresh!
+
+    assert.same { a: "hello", b: false }, instance
+
+    instance\refresh "hello"
+    assert.same { a: "hello", b: false }, instance
+
+    assert_queries {
+      [[SELECT * from "things" where "a" = 'hello' AND "b" = FALSE]]
+      [[SELECT "hello" from "things" where "a" = 'hello' AND "b" = FALSE]]
+    }, queries
+
+
   it "should update model", ->
     class Things extends Model
 
@@ -203,6 +303,10 @@ describe "lapis.db.model", ->
     -- thing3\update "what" -- should error set to null
     thing3\update great: true -- need a way to stub date before testing
 
+    thing3.hello = "world"
+    thing3\update "hello", timestamp: false
+    thing3\update { cat: "dog" }, timestamp: false
+
     assert_queries {
       {
         [[UPDATE "things" SET "height" = 100, "color" = 'green' WHERE "id" = 12]]
@@ -216,6 +320,8 @@ describe "lapis.db.model", ->
         [[UPDATE "timed_things" SET "updated_at" = '2013-08-13 06:56:40', "great" = TRUE WHERE "b" = 3 AND "a" = 2]]
         [[UPDATE "timed_things" SET "great" = TRUE, "updated_at" = '2013-08-13 06:56:40' WHERE "b" = 3 AND "a" = 2]]
       }
+      [[UPDATE "timed_things" SET "hello" = 'world' WHERE "a" = 2 AND "b" = 3]]
+      [[UPDATE "timed_things" SET "cat" = 'dog' WHERE "a" = 2 AND "b" = 3]]
     }, queries
 
   it "should delete model", ->
@@ -322,4 +428,187 @@ describe "lapis.db.model", ->
 
       assert.same { nil, "missing `name`"}, { Things\create! }
 
+    it "should allow to update values on create and on update", ->
+      query_mock['INSERT'] = { { id: 101 } }
+
+      class Things extends Model
+        @constraints: {
+          name: (val, column, values) => values.name = 'changed from ' .. val
+        }
+
+      thing = Things\create name: 'create'
+      thing\update name: 'update'
+
+      assert_queries {
+        [[INSERT INTO "things" ("name") VALUES ('changed from create') RETURNING "id"]]
+        [[UPDATE "things" SET "name" = 'changed from update' WHERE "id" = 101]]
+      }, queries
+
+
+  describe "relations", ->
+    local models
+
+    before_each ->
+      models = {}
+      package.loaded.models = models
+
+    it "should make has_one getter based on class name", ->
+      query_mock['SELECT'] = { { id: 101 } }
+
+      models.Users = class extends Model
+        @primary_key: "id"
+
+      class Posts extends Model
+        @relations: {
+          {"user", has_one: "Users"}
+        }
+
+      post = Posts!
+      post.user_id = 123
+
+      assert post\get_user!
+      assert post\get_user!
+
+      assert_queries {
+        'SELECT * from "users" where "id" = 123 limit 1'
+      }, queries
+
+
+    it "should make has_one getter based on function", ->
+      called = 0
+
+      class Posts extends Model
+        @relations: {
+          {
+            "thing"
+            has_one: =>
+              called += 1
+              "yes"
+          }
+        }
+
+      post = Posts!
+      post.user_id = 123
+
+      assert.same "yes", post\get_thing!
+      assert.same "yes", post\get_thing!
+      assert.same 1, called
+
+      assert_queries { }, queries
+
+    it "should make has_one getters for extend syntax", ->
+      query_mock['SELECT'] = { { id: 101 } }
+
+      models.Users = class extends Model
+        @primary_key: "id"
+
+      m = Model\extend "the_things", {
+        relations: {
+          {"user", has_one: "Users"}
+        }
+      }
+
+      obj = m!
+      obj.user_id = 101
+
+
+      assert obj\get_user! == obj\get_user!
+
+      assert_queries {
+        'SELECT * from "users" where "id" = 101 limit 1'
+      }, queries
+
+    it "should make has_many getter", ->
+      query_mock['SELECT'] = { { id: 101 } }
+
+      models.Posts = class extends Model
+      models.Users = class extends Model
+        @relations: {
+          {"posts", has_many: "Posts"}
+          {"more_posts", has_many: "Posts", where: {color: "blue"}}
+        }
+
+      user = models.Users!
+      user.id = 1234
+
+      user\get_posts!\get_page 1
+      user\get_posts!\get_page 2
+
+      user\get_more_posts!\get_page 2
+
+      user\get_posts(per_page: 44)\get_page 3
+
+      assert_queries {
+        'SELECT * from "posts" where "user_id" = 1234 limit 10 offset 0 '
+        'SELECT * from "posts" where "user_id" = 1234 limit 10 offset 10 '
+        {
+          [[SELECT * from "posts" where "user_id" = 1234 AND "color" = 'blue' limit 10 offset 10 ]]
+          [[SELECT * from "posts" where "color" = 'blue' AND "user_id" = 1234 limit 10 offset 10 ]]
+        }
+        'SELECT * from "posts" where "user_id" = 1234 limit 44 offset 88 '
+      }, queries
+
+  describe "enum", ->
+    import enum from require "lapis.db.model"
+
+    it "should create an enum", ->
+      e = enum {
+        hello: 1
+        world: 2
+        foo: 3
+        bar: 3
+      }
+
+    describe "with enum", ->
+      local e
+      before_each ->
+        e = enum {
+          hello: 1
+          world: 2
+          foo: 3
+          bar: 4
+        }
+
+      it "should get enum values", ->
+        assert.same "hello", e[1]
+        assert.same "world", e[2]
+        assert.same "foo", e[3]
+        assert.same "bar", e[4]
+
+        assert.same 1, e.hello
+        assert.same 2, e.world
+        assert.same 3, e.foo
+        assert.same 4, e.bar
+
+      it "should get enum for_db", ->
+        assert.same 1, e\for_db "hello"
+        assert.same 1, e\for_db 1
+
+        assert.same 2, e\for_db "world"
+        assert.same 2, e\for_db 2
+
+        assert.same 3, e\for_db "foo"
+        assert.same 3, e\for_db 3
+
+        assert.same 4, e\for_db "bar"
+        assert.same 4, e\for_db 4
+
+        assert.has_error ->
+          e\for_db "far"
+
+        assert.has_error ->
+          e\for_db 5
+
+      it "should get enum to_name", ->
+        assert.same "hello", e\to_name "hello"
+        assert.same "hello", e\to_name 1
+
+        assert.same "world", e\to_name "world"
+        assert.same "world", e\to_name 2
+
+        assert.same "foo", e\to_name "foo"
+        assert.same "foo", e\to_name 3
+
+        assert.same "bar", e\to_name "bar"
+        assert.same "bar", e\to_name 4
 
