@@ -135,6 +135,7 @@ init_logger = ->
     logger = require "lapis.logging"
 
 init_db = ->
+  config = require("lapis.config").get!
   default_backend = config.mysql and (config.mysql.backend or "resty_mysql")
   default_backend = default_backend or (config.postgres and config.postgres.backend)
   default_backend = default_backend or "default"
@@ -145,7 +146,8 @@ escape_identifier = (ident) ->
     return ident[2]
 
   ident = tostring ident
-  identifier_quote = dialect.identifier_quote
+  --identifier_quote = dialect.identifier_quote
+  identifier_quote = "`"
   identifier_quote ..  (ident\gsub identifier_quote, identifier_quote .. identifier_quote) .. identifier_quote
 
 escape_literal = (val) ->

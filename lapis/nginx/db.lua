@@ -163,6 +163,7 @@ init_logger = function()
 end
 local init_db
 init_db = function()
+  local config = require("lapis.config").get()
   local default_backend = config.mysql and (config.mysql.backend or "resty_mysql")
   default_backend = default_backend or (config.postgres and config.postgres.backend)
   default_backend = default_backend or "default"
@@ -174,7 +175,7 @@ escape_identifier = function(ident)
     return ident[2]
   end
   ident = tostring(ident)
-  local identifier_quote = dialect.identifier_quote
+  local identifier_quote = "`"
   return identifier_quote .. (ident:gsub(identifier_quote, identifier_quote .. identifier_quote)) .. identifier_quote
 end
 local escape_literal
